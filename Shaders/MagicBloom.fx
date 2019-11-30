@@ -1,43 +1,9 @@
 /*
     Magic Bloom by luluco250
     Modified for Reshade 4.0 by Marot
-    Modified for FFXIV by HealingBrew
     Attempts to simulate a natural-looking bloom.
-
-    Features:
-
-    --Wide bloom blurring, derived from the gaussian function
-      defined here: https://en.wikipedia.org/wiki/Gaussian_blur#Mathematics
-
-    --Eye adaptation, decreases or increases the brightness 
-      of bloom according to the overall image luminance.
-
-    --Lens dirt, as standard I suppose. Really not much here. 
-      It uses an image named "MagicBloom_Dirt.png" so make 
-      sure you have one in your textures directory.
-
-    --Unwanted features can be disabled through 
-      preprocessor definitions, saving performance.
-    
-    Preprocessor definitions:
-
-    --MAGICBLOOM_ADAPT_RESOLUTION:
-        Determines the width/height of the texture used for adaptation.
-        It is recommended to use 256, but you can use as far as 1024 without issues.
-        Too low resolutions will make adaptation seem "unstable".
-        Must be a power of two value: 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024 etc.
-
-    --MAGICBLOOM_BLUR_PRECALCULATED:
-        If set to 0 the gaussian blur will be calculated inside the shader.
-        Otherwise, it uses a pre-calculated kernel (array).
-    
-    --MAGICBLOOM_NODIRT:
-        If set to 1 all lens dirt related features are disabled.
-        Beneficial for performance if you don't wish to use lens dirt.
-
-    --MAGICBLOOM_NOADAPT:
-        If set to 1 all adaptation related features are disabled.
-        Beneficial for performance if you don't wish to use adaptation.
+*/
+// Lightly optimized by Marot Satil for the GShade project. With extra enhancements by HatterOfMad
 
     MIT Licensed:
 
@@ -60,23 +26,15 @@
     LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
-*/
-// Lightly optimized by Marot Satil for the GShade project.
 
 #include "ReShade.fxh"
 
-//Statics
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+// +++++   STATICS   +++++
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 #ifndef MAGICBLOOM_ADAPT_RESOLUTION
     #define MAGICBLOOM_ADAPT_RESOLUTION 256
-#endif
-
-#ifndef MAGICBLOOM_BLUR_PRECALCULATED
-    #define MAGICBLOOM_BLUR_PRECALCULATED 1
-#endif
-
-#ifndef MAGICBLOOM_NODIRT
-    #define MAGICBLOOM_NODIRT 0
 #endif
 
 #ifndef MAGICBLOOM_NOADAPT
@@ -93,16 +51,29 @@ static const float double_pi = 6.283185307179586476925286766559;
 static const int lowest_mip = CONST_LOG2(iAdaptResolution) + 1;
 static const float3 luma_value = float3(0.2126, 0.7152, 0.0722);
 
-//Uniforms
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+// +++++   UNIFORMS   +++++
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 uniform float fBloom_Intensity <
     ui_label = "Bloom Intensity";
     ui_tooltip = "Amount of bloom applied to the image.";
     ui_type = "slider";
     ui_min = 0.0;
-    ui_max = 10.0;
-    ui_step = 0.001;
+    ui_max = 2.5;
+    ui_step = 0.1;
 > = 1.0;
+
+uniform float MagicBloomSaturationBoost
+<
+	ui_label = "Bloom Saturation Boost";
+    ui_tooltip = 
+    "Saturation of the bloom";
+    ui_type = "slider";
+    ui_min = 0.0;
+    ui_max = 2.5;
+    ui_step = 0.1;
+> = 0.0;
 
 uniform float fBloom_Threshold <
     ui_label = "Bloom Threshold";
@@ -112,23 +83,10 @@ uniform float fBloom_Threshold <
     "At 1.0 all pixels are used in bloom.\n"
     "This value is not normalized, it is exponential, therefore changes in lower values are more noticeable than at higher values.";
     ui_type = "slider";
-    ui_min = 1.0;
-    ui_max = 10.0;
-    ui_step = 0.1;
-> = 2.0;
-
-#if !MAGICBLOOM_NODIRT
-uniform float fDirt_Intensity <
-    ui_label = "Dirt Intensity";
-    ui_tooltip = 
-    "Amount of lens dirt applied to bloom.\n"
-    "Uses a texture called \"MagicBloom_Dirt.png\" from your textures directory(ies).";
-    ui_type = "slider";
     ui_min = 0.0;
     ui_max = 1.0;
-    ui_step = 0.001;
-> = 0.0;
-#endif
+    ui_step = 0.1;
+> = -.0;
 
 #if !MAGICBLOOM_NOADAPT
 uniform float fExposure <
@@ -195,21 +153,8 @@ uniform int iAdapt_Precision <
     ui_max = lowest_mip;
     ui_step = 0.1;
 > = lowest_mip * 0.3;
-
-uniform bool bAdapt_IgnoreOccludedByUI <
-  ui_label = "Ignore Trigger Area if Occluded by UI (FFXIV)";
-> = 0;
-
-uniform float fAdapt_IgnoreTreshold <
-    ui_label = "Ignore Alpha Treshold";
-    ui_tooltip = "How visible the UI must be to be ignored"
-                 "0 = any UI, including window shadows prevents occlusion"
-                 "1 = only 100% opaque windows prevent occlusion";
-    ui_type = "slider";
-    ui_min = 0.0;
-    ui_max = 1.0;
-> = 0.2;
 #endif
+
 
 uniform uint iDebug <
     ui_label = "Debug Options";
@@ -228,16 +173,16 @@ texture tMagicBloom_5 { Width = BUFFER_WIDTH / 32; Height = BUFFER_HEIGHT / 32; 
 texture tMagicBloom_6 { Width = BUFFER_WIDTH / 64; Height = BUFFER_HEIGHT / 64; Format = RGBA16F; };
 texture tMagicBloom_7 { Width = BUFFER_WIDTH / 128; Height = BUFFER_HEIGHT / 128; Format = RGBA16F; };
 texture tMagicBloom_8 { Width = BUFFER_WIDTH / 256; Height = BUFFER_HEIGHT / 256; Format = RGBA16F; };
+
 #if !MAGICBLOOM_NOADAPT
 texture tMagicBloom_Small { Width = iAdaptResolution; Height = iAdaptResolution; Format = R32F; MipLevels = lowest_mip; };
 texture tMagicBloom_Adapt { Format = R32F; };
 texture tMagicBloom_LastAdapt { Format = R32F; };
 #endif
-#if !MAGICBLOOM_NODIRT
-texture tMagicBloom_Dirt <source="MagicBloom_Dirt.png";> { Width = BUFFER_WIDTH; Height = BUFFER_HEIGHT; };
-#endif
 
-//Samplers
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+// +++++   SAMPLERS   +++++
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 sampler sMagicBloom_1 { Texture = tMagicBloom_1; };
 sampler sMagicBloom_2 { Texture = tMagicBloom_2; };
@@ -247,64 +192,44 @@ sampler sMagicBloom_5 { Texture = tMagicBloom_5; };
 sampler sMagicBloom_6 { Texture = tMagicBloom_6; };
 sampler sMagicBloom_7 { Texture = tMagicBloom_7; };
 sampler sMagicBloom_8 { Texture = tMagicBloom_8; };
+
 #if !MAGICBLOOM_NOADAPT
 sampler sMagicBloom_Small { Texture = tMagicBloom_Small; };
 sampler sMagicBloom_Adapt { Texture = tMagicBloom_Adapt; MinFilter = POINT; MagFilter = POINT; };
 sampler sMagicBloom_LastAdapt { Texture = tMagicBloom_LastAdapt; MinFilter = POINT; MagFilter = POINT; };
 #endif
-#if !MAGICBLOOM_NODIRT
-sampler sMagicBloom_Dirt { Texture = tMagicBloom_Dirt; };
-#endif
 
-//Functions
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+// +++++   FUNCTIONS   +++++
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-#if !MAGICBLOOM_BLUR_PRECALCULATED
-float gaussian_function(float2 i) {
-    static const float first_part = 1.0 / (double_pi * (sigma * 2.0);
-    static const float second_part_a = 1.0 / (2.0 * (sigma * 2.0));
-    static const float second_part_b = ((i.x * 2.0) + (i.y * 2.0)) * second_part_a;
-    return first_part * exp(-second_part_b);
-}
-#endif
 
 //Why use a single-pass blur? To reduce the amount of textures used in half.
 //Scale should be the original resolution divided by target resolution.
 float3 blur(sampler sp, float2 uv, float scale) {
     float2 ps = ReShade::PixelSize * scale;
     
-    #if MAGICBLOOM_BLUR_PRECALCULATED
     static const float kernel[9] = { 
         0.0269955, 0.0647588, 0.120985, 0.176033, 0.199471, 0.176033, 0.120985, 0.0647588, 0.0269955 
     };
     static const float accum = 1.02352;
-    #else
-    float accum = 0.0;
-    #endif
     
     float gaussian_weight = 0.0;
     float3 col = 0.0;
     
     for (int x = -iBlurSamples; x <= iBlurSamples; ++x) {
         for (int y = -iBlurSamples; y <= iBlurSamples; ++y) {
-            #if MAGICBLOOM_BLUR_PRECALCULATED
             gaussian_weight = kernel[x + iBlurSamples] * kernel[y + iBlurSamples];
-            #else
-            gaussian_weight = gaussian_function(float2(x, y));
-            accum += gaussian_weight;
-            #endif
             col += tex2D(sp, uv + ps * float2(x, y)).rgb * gaussian_weight;
         }
     }
 
-    #if MAGICBLOOM_BLUR_PRECALCULATED
     return col * accum;
-    #else
-    return col / accum;
-    #endif
 }
 
 /*
     Uncharted 2 Tonemapper
+
 
     Thanks John Hable and Naughty Dog.
 */
@@ -329,19 +254,9 @@ float3 blend_screen(float3 a, float3 b) {
     return 1.0 - (1.0 - a) * (1.0 - b);
 }
 
-/*
-    The function below is a leftover from debugging.
-    It just draws a line on the screen, it's horizontal position being
-    the value you specify (from 0.0-1.0, becoming left-right).
-    No use now but might be useful later on so I just left it here.
-*/
-/*void debug_value(inout float3 col, float2 uv, float value, float3 needle_color) {
-    static const float2 ps = ReShade::PixelSize;
-	if (uv.x + ps.x > value && uv.x - ps.x < value)
-		col = needle_color;
-}*/
-
-//Shaders
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+// +++++   SHADERS   +++++
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 /*
     Thresholding is performed on the first blur for two reasons:
@@ -350,7 +265,7 @@ float3 blend_screen(float3 a, float3 b) {
 */
 float4 PS_Blur1(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
     float3 col = blur(ReShade::BackBuffer, uv, 2.0);
-    col = pow(abs(col), fBloom_Threshold);
+    col = pow(abs(col),1.0 + fBloom_Threshold);
     col *= fBloom_Intensity;
     return float4(col, 1.0);
 }
@@ -395,6 +310,8 @@ float4 PS_Blend(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
                  + tex2D(sMagicBloom_7, uv).rgb
                  + tex2D(sMagicBloom_8, uv).rgb;
     //Dunno if making the division by 8 a static multiplication helps, but whatever.
+
+   
     static const float bloom_accum = 1.0 / 8.0;
     bloom *= bloom_accum;
 
@@ -406,17 +323,29 @@ float4 PS_Blend(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
     bloom = tonemap(bloom, 100.0);
     #endif
 
-    #if !MAGICBLOOM_NODIRT
-    float3 dirt = tex2D(sMagicBloom_Dirt, uv).rgb;
-    dirt *= fDirt_Intensity;
-    bloom = blend_screen(bloom, dirt * bloom);
-    #endif
+     // bloom = (lerp(pow(abs(bloom.xyz), 1.0 + MagicBloomSaturationBoost), bloom.xyz, sqrt( bloom.xyz ) ) );
+   bloom = lerp(dot(bloom.rgb,luma_value),bloom.rgb,1.0 + MagicBloomSaturationBoost + (MagicBloomSaturationBoost / 2) );  // doodlez tweak add saturation
+  	
+	// float luma = dot(luma_value, bloom);
+
+
+	// float max_color = max(bloom.r, max(bloom.g, bloom.b)); // Find the strongest color
+	// float min_color = min(bloom.r, min(bloom.g, bloom.b)); // Find the weakest color
+
+	// float color_saturation = max_color - min_color; // The difference between the two is the saturation
+
+	// // Extrapolate between luma and original by 1 + (1-saturation) - current
+	// float3 coeffVibrance = float3(1.0, 1, 1 * MagicBloomSaturationBoost);
+	// // float3 coeffVibrance = float3(1.0, .94, 0.91 * MagicBloomSaturationBoost);
+	// bloom = lerp(luma, bloom, (coeffVibrance * (5.0 - (sign(coeffVibrance) * color_saturation))));
+
+ 
+  
 
     col = blend_screen(col, bloom);
 
     //If we're to display the bloom texture, we replace col with it.
-	if (iDebug == 1)
-		col = bloom;
+    col = iDebug == 1 ? bloom : col;
 
     return float4(col, 1.0);
 }
@@ -439,10 +368,6 @@ float PS_GetAdapt(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target {
     curr *= fAdapt_Sensitivity;
     curr = clamp(curr, f2Adapt_Clip.x, f2Adapt_Clip.y);
     const float last = tex2D(sMagicBloom_LastAdapt, 0.0).x;
-    const float uiVisibility = tex2D(ReShade::BackBuffer, float2(0.5, 0.5)).a;
-    if(bAdapt_IgnoreOccludedByUI && uiVisibility > fAdapt_IgnoreTreshold) {
-        return last == 0 ? curr : last;
-    }
     //Using the frametime/delta here would actually scale adaptation with the framerate.
     //We don't want that, so we don't even bother with it.
     return lerp(last, curr, fAdapt_Speed);
